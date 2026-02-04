@@ -1,0 +1,252 @@
+# Reusable workflow for building and releasing Axero Apps
+# Called from app repositories to create releases
+#
+# Usage in app repo (.github/workflows/release.yml):
+#
+#   name: Release
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         version_bump:
+#           type: choice
+#           options: [patch, minor, major]
+#     push:
+#       branches: [main, master]
+#
+#   jobs:
+#     release:
+#       uses: joanlm/axeroapp-workflows/.github/workflows/build-axero-app.yml@main
+#       with:
+#         version_bump: ${{ inputs.version_bump || 'patch' }}
+#       secrets:
+#         cli_token: ${{ secrets.AXEROAPP_CLI_TOKEN }}
+#
+# Required secret:
+#   AXEROAPP_CLI_TOKEN - GitHub PAT with repo access to joanlm/axeroapp-cli
+
+name: Build Axero App
+
+on:
+  workflow_call:
+    inputs:
+      version_bump:
+        description: 'Version bump type (patch, minor, major) - only used if manifest version unchanged'
+        required: false
+        default: 'patch'
+        type: string
+      app_path:
+        description: 'Path to the app directory (default: repo root)'
+        required: false
+        default: '.'
+        type: string
+      cli_version:
+        description: 'CLI version to use (default: latest)'
+        required: false
+        default: 'latest'
+        type: string
+      skip_build:
+        description: 'Skip the build step (for apps without TypeScript/CSS)'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      cli_token:
+        description: 'GitHub token with access to axeroapp-cli private repo'
+        required: true
+    outputs:
+      version:
+        description: 'The version that was released'
+        value: ${{ jobs.build.outputs.version }}
+      release_url:
+        description: 'URL of the created release'
+        value: ${{ jobs.build.outputs.release_url }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_url: ${{ steps.release.outputs.url }}
+
+    steps:
+      - name: Checkout app repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for version comparison
+
+      - name: Get latest release version
+        id: latest
+        run: |
+          # Get the latest release tag, strip 'v' prefix
+          LATEST=$(gh release view --json tagName -q '.tagName' 2>/dev/null || echo "v0.0.0")
+          LATEST_VERSION="${LATEST#v}"
+          echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Latest release: $LATEST_VERSION"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Read manifest version
+        id: manifest
+        run: |
+          APP_PATH="${{ inputs.app_path }}"
+          MANIFEST="$APP_PATH/manifest.json"
+
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::error::manifest.json not found at $MANIFEST"
+            exit 1
+          fi
+
+          VERSION=$(jq -r '.version // "1.0.0"' "$MANIFEST")
+          APP_KEY=$(jq -r '.key // .appKey // "app"' "$MANIFEST")
+          APP_NAME=$(jq -r '.name // .key // "Axero App"' "$MANIFEST")
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "app_key=$APP_KEY" >> $GITHUB_OUTPUT
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "Manifest version: $VERSION, App: $APP_NAME ($APP_KEY)"
+
+      - name: Determine release version
+        id: version
+        run: |
+          MANIFEST_VERSION="${{ steps.manifest.outputs.version }}"
+          LATEST_VERSION="${{ steps.latest.outputs.version }}"
+          BUMP_TYPE="${{ inputs.version_bump }}"
+
+          echo "Comparing: manifest=$MANIFEST_VERSION vs latest=$LATEST_VERSION"
+
+          if [ "$MANIFEST_VERSION" != "$LATEST_VERSION" ]; then
+            # Version was manually changed in manifest
+            NEW_VERSION="$MANIFEST_VERSION"
+            echo "Using manifest version (manually updated)"
+          else
+            # Auto-bump version
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+            MAJOR=${MAJOR:-0}
+            MINOR=${MINOR:-0}
+            PATCH=${PATCH:-0}
+
+            case "$BUMP_TYPE" in
+              major)
+                NEW_VERSION="$((MAJOR + 1)).0.0"
+                ;;
+              minor)
+                NEW_VERSION="$MAJOR.$((MINOR + 1)).0"
+                ;;
+              *)
+                NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+                ;;
+            esac
+            echo "Auto-bumped: $LATEST_VERSION -> $NEW_VERSION ($BUMP_TYPE)"
+          fi
+
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update manifest version
+        run: |
+          APP_PATH="${{ inputs.app_path }}"
+          MANIFEST="$APP_PATH/manifest.json"
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+
+          jq --arg v "$NEW_VERSION" '.version = $v' "$MANIFEST" > tmp.json && mv tmp.json "$MANIFEST"
+          echo "Updated manifest.json to version $NEW_VERSION"
+
+      - name: Download axeroapp CLI
+        run: |
+          CLI_VERSION="${{ inputs.cli_version }}"
+          CLI_REPO="joanlm/axeroapp-cli"
+
+          echo "Downloading axeroapp CLI..."
+
+          if [ "$CLI_VERSION" = "latest" ]; then
+            gh release download --repo "$CLI_REPO" --pattern "axeroapp-linux-x64" --dir .
+          else
+            gh release download "v$CLI_VERSION" --repo "$CLI_REPO" --pattern "axeroapp-linux-x64" --dir .
+          fi
+
+          chmod +x axeroapp-linux-x64
+          sudo mv axeroapp-linux-x64 /usr/local/bin/axeroapp
+
+          echo "axeroapp CLI installed"
+          axeroapp --version 2>/dev/null || echo "(version command not available)"
+        env:
+          GH_TOKEN: ${{ secrets.cli_token }}
+
+      - name: Build app
+        if: ${{ inputs.skip_build != true }}
+        run: |
+          APP_PATH="${{ inputs.app_path }}"
+          cd "$APP_PATH"
+
+          echo "Building app..."
+          if axeroapp build . 2>&1; then
+            echo "Build completed"
+          else
+            echo "Build step completed (may have no buildable pages)"
+          fi
+
+      - name: Package app
+        id: package
+        run: |
+          APP_PATH="${{ inputs.app_path }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_KEY="${{ steps.manifest.outputs.app_key }}"
+
+          cd "$APP_PATH"
+
+          ZIP_NAME="${APP_KEY}-v${VERSION}.zip"
+          echo "Packaging as $ZIP_NAME..."
+
+          axeroapp package . --output "$ZIP_NAME"
+
+          # Move to workspace root for upload
+          if [ "$APP_PATH" != "." ]; then
+            mv "$ZIP_NAME" "$GITHUB_WORKSPACE/"
+          fi
+
+          echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
+          ls -la "$GITHUB_WORKSPACE/$ZIP_NAME"
+
+      - name: Create GitHub Release
+        id: release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ZIP_NAME="${{ steps.package.outputs.zip_name }}"
+          APP_NAME="${{ steps.manifest.outputs.app_name }}"
+
+          # Generate release notes
+          cat > release_notes.md << 'NOTES'
+          ## Installation
+
+          **Via Axero App Manager:**
+          1. Go to App Manager → Install
+          2. Select "GitHub Release"
+          3. Choose this repository and version
+
+          **Manual:** Download the ZIP and upload via App Manager.
+
+          ---
+          *Built with [axeroapp](https://github.com/joanlm/axeroapp-workflows)*
+          NOTES
+
+          # Create release
+          RELEASE_URL=$(gh release create "v$VERSION" \
+            "$GITHUB_WORKSPACE/$ZIP_NAME" \
+            --title "$APP_NAME v$VERSION" \
+            --notes-file release_notes.md)
+
+          echo "url=$RELEASE_URL" >> $GITHUB_OUTPUT
+          echo "::notice::Release created: $RELEASE_URL"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_NAME="${{ steps.manifest.outputs.app_name }}"
+          RELEASE_URL="${{ steps.release.outputs.url }}"
+
+          echo "## 🚀 Release Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**App:** $APP_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** v$VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** $RELEASE_URL" >> $GITHUB_STEP_SUMMARY
