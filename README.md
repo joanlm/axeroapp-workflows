@@ -29,6 +29,9 @@ on:
     paths-ignore:
       - '**.md'
 
+permissions:
+  contents: write  # Required for creating releases
+
 jobs:
   release:
     uses: joanlm/axeroapp-workflows/.github/workflows/build-axero-app.yml@main

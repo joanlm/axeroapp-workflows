@@ -64,6 +64,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Required for creating releases
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_url: ${{ steps.release.outputs.url }}
