@@ -175,10 +175,9 @@ jobs:
         if: ${{ inputs.skip_build != true }}
         run: |
           APP_PATH="${{ inputs.app_path }}"
-          cd "$APP_PATH"
 
           echo "Building app..."
-          if axeroapp build . 2>&1; then
+          if axeroapp build --path "$APP_PATH" 2>&1; then
             echo "Build completed"
           else
             echo "Build step completed (may have no buildable pages)"
@@ -191,20 +190,14 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           APP_KEY="${{ steps.manifest.outputs.app_key }}"
 
-          cd "$APP_PATH"
-
           ZIP_NAME="${APP_KEY}-v${VERSION}.zip"
           echo "Packaging as $ZIP_NAME..."
 
-          axeroapp package . --output "$ZIP_NAME"
-
-          # Move to workspace root for upload
-          if [ "$APP_PATH" != "." ]; then
-            mv "$ZIP_NAME" "$GITHUB_WORKSPACE/"
-          fi
+          # Package outputs to current directory
+          axeroapp package --path "$APP_PATH" --output "$ZIP_NAME"
 
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
-          ls -la "$GITHUB_WORKSPACE/$ZIP_NAME"
+          ls -la "$ZIP_NAME"
 
       - name: Create GitHub Release
         id: release
@@ -230,7 +223,7 @@ jobs:
 
           # Create release
           RELEASE_URL=$(gh release create "v$VERSION" \
-            "$GITHUB_WORKSPACE/$ZIP_NAME" \
+            "$ZIP_NAME" \
             --title "$APP_NAME v$VERSION" \
             --notes-file release_notes.md)
 
