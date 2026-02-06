@@ -116,13 +116,27 @@ jobs:
 
           echo "Comparing: manifest=$MANIFEST_VERSION vs latest=$LATEST_VERSION"
 
-          if [ "$MANIFEST_VERSION" != "$LATEST_VERSION" ]; then
-            # Version was manually changed in manifest
+          # Compare versions numerically to check if manifest is ahead of latest release
+          version_gt() {
+            IFS='.' read -r a1 b1 c1 <<< "$1"
+            IFS='.' read -r a2 b2 c2 <<< "$2"
+            a1=${a1:-0}; b1=${b1:-0}; c1=${c1:-0}
+            a2=${a2:-0}; b2=${b2:-0}; c2=${c2:-0}
+            [ "$a1" -gt "$a2" ] && return 0
+            [ "$a1" -lt "$a2" ] && return 1
+            [ "$b1" -gt "$b2" ] && return 0
+            [ "$b1" -lt "$b2" ] && return 1
+            [ "$c1" -gt "$c2" ] && return 0
+            return 1
+          }
+
+          if version_gt "$MANIFEST_VERSION" "$LATEST_VERSION"; then
+            # Manifest version is ahead of latest release - use it directly
             NEW_VERSION="$MANIFEST_VERSION"
             BUMPED="false"
-            echo "Using manifest version (manually updated)"
+            echo "Using manifest version (manually bumped ahead of latest release)"
           else
-            # Auto-bump version
+            # Auto-bump from latest release version
             IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
             MAJOR=${MAJOR:-0}
             MINOR=${MINOR:-0}
