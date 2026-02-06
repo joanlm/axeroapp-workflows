@@ -119,6 +119,7 @@ jobs:
           if [ "$MANIFEST_VERSION" != "$LATEST_VERSION" ]; then
             # Version was manually changed in manifest
             NEW_VERSION="$MANIFEST_VERSION"
+            BUMPED="false"
             echo "Using manifest version (manually updated)"
           else
             # Auto-bump version
@@ -138,10 +139,12 @@ jobs:
                 NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
                 ;;
             esac
+            BUMPED="true"
             echo "Auto-bumped: $LATEST_VERSION -> $NEW_VERSION ($BUMP_TYPE)"
           fi
 
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bumped=$BUMPED" >> $GITHUB_OUTPUT
 
       - name: Update manifest version
         run: |
@@ -202,6 +205,22 @@ jobs:
           echo "zip_name=$ZIP_NAME" >> $GITHUB_OUTPUT
           ls -la "$ZIP_NAME"
 
+      - name: Commit version bump
+        id: commit
+        if: steps.version.outputs.bumped == 'true'
+        run: |
+          APP_PATH="${{ inputs.app_path }}"
+          MANIFEST="$APP_PATH/manifest.json"
+          NEW_VERSION="${{ steps.version.outputs.version }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$MANIFEST"
+          git commit -m "Bump version to $NEW_VERSION [skip ci]"
+          git push
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "Committed version bump to $NEW_VERSION"
+
       - name: Create GitHub Release
         id: release
         run: |
@@ -209,6 +228,7 @@ jobs:
           ZIP_NAME="${{ steps.package.outputs.zip_name }}"
           APP_NAME="${{ steps.manifest.outputs.app_name }}"
           APP_KEY="${{ steps.manifest.outputs.app_key }}"
+          COMMIT_SHA="${{ steps.commit.outputs.sha }}"
 
           # Generate release notes with clear download instructions
           cat > release_notes.md << NOTES
@@ -234,11 +254,17 @@ jobs:
           *Built with [axeroapp-workflows](https://github.com/joanlm/axeroapp-workflows)*
           NOTES
 
-          # Create release
+          # Create release, targeting the version bump commit if it exists
+          TARGET_FLAG=""
+          if [ -n "$COMMIT_SHA" ]; then
+            TARGET_FLAG="--target $COMMIT_SHA"
+          fi
+
           RELEASE_URL=$(gh release create "v$VERSION" \
             "$ZIP_NAME" \
             --title "$APP_NAME v$VERSION" \
-            --notes-file release_notes.md)
+            --notes-file release_notes.md \
+            $TARGET_FLAG)
 
           echo "url=$RELEASE_URL" >> $GITHUB_OUTPUT
           echo "::notice::Release created: $RELEASE_URL"
