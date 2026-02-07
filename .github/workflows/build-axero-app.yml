@@ -141,10 +141,28 @@ jobs:
             return 1
           }
 
-          if version_gt "$MANIFEST_VERSION" "$LATEST_VERSION"; then
+          # Handle pre-release versioning first (no auto-bump for pre-releases)
+          IS_PRERELEASE="false"
+          if [ -n "$PRERELEASE_LABEL" ]; then
+            IS_PRERELEASE="true"
+            # Pre-releases always use the current manifest version as base (no bump)
+            BASE_VERSION="$MANIFEST_VERSION"
+            BUMPED="false"
+
+            # Sanitize label: replace special chars with -, lowercase, truncate to 20 chars
+            SANITIZED_LABEL=$(echo "$PRERELEASE_LABEL" | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]' | cut -c1-20 | sed 's/-$//')
+
+            # Count existing pre-releases with same label to get build number
+            BUILD_NUM=$(gh release list --limit 100 --json tagName -q "[.[].tagName | select(contains(\"-${SANITIZED_LABEL}.\"))] | length" 2>/dev/null || echo "0")
+            BUILD_NUM=$((BUILD_NUM + 1))
+
+            NEW_VERSION="${BASE_VERSION}-${SANITIZED_LABEL}.${BUILD_NUM}"
+            echo "Pre-release version: $NEW_VERSION (base from manifest, no bump)"
+          elif version_gt "$MANIFEST_VERSION" "$LATEST_VERSION"; then
             # Manifest version is ahead of latest release - use it directly
             BASE_VERSION="$MANIFEST_VERSION"
             BUMPED="false"
+            NEW_VERSION="$BASE_VERSION"
             echo "Using manifest version (manually bumped ahead of latest release)"
           else
             # Auto-bump from latest release version
@@ -165,25 +183,8 @@ jobs:
                 ;;
             esac
             BUMPED="true"
-            echo "Auto-bumped: $LATEST_VERSION -> $BASE_VERSION ($BUMP_TYPE)"
-          fi
-
-          # Handle pre-release versioning
-          IS_PRERELEASE="false"
-          if [ -n "$PRERELEASE_LABEL" ]; then
-            IS_PRERELEASE="true"
-            # Sanitize label: replace special chars with -, lowercase, truncate to 20 chars
-            SANITIZED_LABEL=$(echo "$PRERELEASE_LABEL" | sed 's/[^a-zA-Z0-9-]/-/g' | tr '[:upper:]' '[:lower:]' | cut -c1-20 | sed 's/-$//')
-
-            # Count existing pre-releases with same label to get build number
-            BUILD_NUM=$(gh release list --limit 100 --json tagName -q "[.[].tagName | select(contains(\"-${SANITIZED_LABEL}.\"))] | length" 2>/dev/null || echo "0")
-            BUILD_NUM=$((BUILD_NUM + 1))
-
-            NEW_VERSION="${BASE_VERSION}-${SANITIZED_LABEL}.${BUILD_NUM}"
-            BUMPED="false"  # Don't commit version bump for pre-releases
-            echo "Pre-release version: $NEW_VERSION"
-          else
             NEW_VERSION="$BASE_VERSION"
+            echo "Auto-bumped: $LATEST_VERSION -> $BASE_VERSION ($BUMP_TYPE)"
           fi
 
           echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
